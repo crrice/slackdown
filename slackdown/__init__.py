@@ -1,4 +1,5 @@
 import re
+import copy
 try:
     # Python 2 module
     from HTMLParser import HTMLParser
@@ -13,7 +14,8 @@ Slack characters that serve as delimination options.
 LIST_DELIMITERS = {
     '\-': 'dash',
     u'\u2022': 'dot',
-    '\d*\.': 'numbered',
+    '\*': 'dot',
+    '\w*\.': 'numbered',
 }
 
 """
@@ -79,8 +81,8 @@ def render(txt):
         class_name = LIST_DELIMITERS[delimeter]
 
         # Wrap any lines that start with the slack_tag in <li></li>
-        list_regex = u'(?:^|\n){}\s?(.*)'.format(slack_tag)
-        list_repl = r'<li class="list-item-{}">\g<1></li>'.format(class_name)
+        list_regex = r'(?m)^( *){} (.*)\n'.format(slack_tag)
+        list_repl = lambda matchobj: r'<li class="list-item-{} indent-{}">{}</li>'.format(class_name, len(matchobj.group(1)) // 4, matchobj.group(2))
         txt = re.sub(list_regex, list_repl, txt)
 
     # hanlde blockquotes
@@ -109,7 +111,7 @@ def render(txt):
     txt = parser.clean()
 
     # convert multiple spaces
-    txt = txt.replace(r'  ', ' &nbsp')
+    txt = txt.replace(r'  ', ' &nbsp;')
 
     return txt
 
@@ -127,7 +129,9 @@ class CustomSlackdownHTMLParser(HTMLParser):
         self.current_parent_element = {}
         self.current_parent_element['tag'] = ''
         self.current_parent_element['attrs'] = {}
-        self.parsing_li = False
+        self.parsing_li = False # this is not used??
+        self.indent_level = 0
+        self.list_stack = []
 
         HTMLParser.__init__(self)
 
@@ -146,8 +150,12 @@ class CustomSlackdownHTMLParser(HTMLParser):
             c=list_type
         )
         self.cleaned_html += html
+        if self.current_parent_element['tag'] in ['ul', 'ol']:
+            self.list_stack.append(copy.deepcopy(self.current_parent_element))
+            self.indent_level += 1
         self.current_parent_element['tag'] = LIST_TYPES[list_type]
         self.current_parent_element['attrs'] = {'class': list_type}
+
 
     def _close_list(self):
         """
@@ -161,8 +169,15 @@ class CustomSlackdownHTMLParser(HTMLParser):
             t=tag
         )
         self.cleaned_html += html
-        self.current_parent_element['tag'] = ''
-        self.current_parent_element['attrs'] = {}
+        if not self.list_stack:
+            self.current_parent_element['tag'] = ''
+            self.current_parent_element['attrs'] = {}
+
+        else:
+            self.current_parent_element = self.list_stack.pop()
+            self.indent_level -= 1
+
+
 
     def handle_starttag(self, tag, attrs):
         """
@@ -177,6 +192,10 @@ class CustomSlackdownHTMLParser(HTMLParser):
             if self.current_parent_element['tag'] != '':
                 # close the parent element
                 self.cleaned_html += '</{}>'.format(self.current_parent_element['tag'])
+                if self.current_parent_element['tag'] in ['ol', 'ul']:
+                    while self.indent_level > 0:
+                        self._close_list()
+                    self._close_list()
 
             self.current_parent_element['tag'] = tag
             self.current_parent_element['attrs'] = {}
@@ -188,19 +207,32 @@ class CustomSlackdownHTMLParser(HTMLParser):
             self.parsing_li = True
 
             # Parse the class name & subsequent type
-            class_name = attrs_dict['class']
+            class_arr = attrs_dict['class'].split(' ')
+            class_name = class_arr[0]
             list_type = class_name[10:]
+            indent_level = int(class_arr[1][7:])
 
             # Check if parsing a list
-            if self.current_parent_element['tag'] == 'ul' or self.current_parent_element['tag'] == 'ol':
+            if (self.current_parent_element['tag'] == 'ul' or self.current_parent_element['tag'] == 'ol') and (indent_level == self.indent_level):
                 cur_list_type = self.current_parent_element['attrs']['class']
                 # Parsing a different list
                 if cur_list_type != list_type:
                     # Close that list
-                    self._close_list()
+                    #self._close_list()
 
                     # Open new list
                     self._open_list(list_type)
+
+            # Parent tag is list, indent levels do not match
+            elif (self.current_parent_element['tag'] == 'ul' or self.current_parent_element['tag'] == 'ol'):
+
+                if indent_level < self.indent_level:
+                    while indent_level < self.indent_level:
+                        self._close_list()
+                else:
+                    while indent_level > self.indent_level:
+                        self._open_list(list_type)
+
             # Not parsing a list
             else:
                 # if parsing some other parent
@@ -216,10 +248,15 @@ class CustomSlackdownHTMLParser(HTMLParser):
             # If parsing a paragraph, close it
             if self.current_parent_element['tag'] == 'p':
                 self.cleaned_html += '</p>'
-                self.current_parent_element['tag'] = ''
-                self.current_parent_element['attrs'] = {}
+                if not self.list_stack:
+                    self.current_parent_element['tag'] = ''
+                    self.current_parent_element['attrs'] = {}
+                else:
+                    self.current_parent_element = self.list_stack.pop()
             # If parsing a list, close it
             elif self.current_parent_element['tag'] == 'ul' or self.current_parent_element['tag'] == 'ol':
+                while self.indent_level > 0:
+                    self._close_list()
                 self._close_list()
             # If parsing any other parent element, keep it
             elif self.current_parent_element['tag'] in PARENT_ELEMENTS:
@@ -244,18 +281,23 @@ class CustomSlackdownHTMLParser(HTMLParser):
 
             self.cleaned_html += '>'
 
+
     def handle_endtag(self, tag):
         """
         Called by HTMLParser.feed when an end tag is found.
         """
         if tag in PARENT_ELEMENTS:
-            self.current_parent_element['tag'] = ''
-            self.current_parent_element['attrs'] = ''
+            if self.list_stack:
+                self.current_parent_element = self.list_stack.pop()
+            else:
+                self.current_parent_element['tag'] = ''
+                self.current_parent_element['attrs'] = ''
 
         if tag == 'li':
             self.parsing_li = True
         if tag != 'br':
             self.cleaned_html += '</{}>'.format(tag)
+
 
     def handle_data(self, data):
         """
@@ -266,6 +308,7 @@ class CustomSlackdownHTMLParser(HTMLParser):
             self.current_parent_element['tag'] = 'p'
 
         self.cleaned_html += data
+
 
     def _remove_pre_formatting(self):
         """
