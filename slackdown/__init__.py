@@ -7,14 +7,14 @@ except ImportError:
     # Python 3 module
     from html.parser import HTMLParser
 
+DEBUG = False
 
 """
 Slack characters that serve as delimination options.
 """
 LIST_DELIMITERS = {
     '\-': 'dash',
-    u'\u2022': 'dot',
-    '\*': 'dot',
+    "[{}]".format(''.join([u'\u2022', u'\u25e6', u'\u25aa', '\*'])): 'dot',
     '\w*\.': 'numbered',
 }
 
@@ -62,6 +62,8 @@ def render(txt):
     """
     Accepts Slack formatted text and returns HTML.
     """
+    if DEBUG:
+        print("Initial text: %s" % list(txt))
 
     # Removing links to other channels
     txt = re.sub(r'<#[^\|]*\|(.*)>', r'#\g<1>', txt)
@@ -81,9 +83,12 @@ def render(txt):
         class_name = LIST_DELIMITERS[delimeter]
 
         # Wrap any lines that start with the slack_tag in <li></li>
-        list_regex = r'(?m)^( *){} (.*)\n'.format(slack_tag)
+        list_regex = r'(?m)^( *){} (.*)\n?'.format(slack_tag)
         list_repl = lambda matchobj: r'<li class="list-item-{} indent-{}">{}</li>'.format(class_name, len(matchobj.group(1)) // 4, matchobj.group(2))
         txt = re.sub(list_regex, list_repl, txt)
+
+        if DEBUG:
+            print("Txt after %s:\n%s\n" % (delimeter, txt))
 
     # hanlde blockquotes
     txt = re.sub(u'(^|\n)(?:&gt;){3}\s?(.*)$', r'\g<1><blockquote>\g<2></blockquote>', txt, flags=re.DOTALL)
@@ -124,6 +129,9 @@ class CustomSlackdownHTMLParser(HTMLParser):
         """
         Initialize custom parser properties.
         """
+
+        if DEBUG:
+            print("Dirty HTML: %s\n" % txt)
         self.dirty_html = txt
         self.cleaned_html = ''
         self.current_parent_element = {}
@@ -152,6 +160,8 @@ class CustomSlackdownHTMLParser(HTMLParser):
         self.cleaned_html += html
         if self.current_parent_element['tag'] in ['ul', 'ol']:
             self.list_stack.append(copy.deepcopy(self.current_parent_element))
+            if DEBUG:
+                print("Pushing ", self.current_parent_element['tag'])
             self.indent_level += 1
         self.current_parent_element['tag'] = LIST_TYPES[list_type]
         self.current_parent_element['attrs'] = {'class': list_type}
@@ -175,6 +185,8 @@ class CustomSlackdownHTMLParser(HTMLParser):
 
         else:
             self.current_parent_element = self.list_stack.pop()
+            if DEBUG:
+                print("Popping ", self.current_parent_element['tag'])
             self.indent_level -= 1
 
 
@@ -183,6 +195,8 @@ class CustomSlackdownHTMLParser(HTMLParser):
         """
         Called by HTMLParser.feed when a start tag is found.
         """
+        if DEBUG:
+            print("Handle starttag %s\nCurrent Parent: %s\nParent List: %s" % (tag, self.current_parent_element, self.list_stack))
         # Parse the tag attributes
         attrs_dict = dict(t for t in attrs)
 
@@ -286,6 +300,8 @@ class CustomSlackdownHTMLParser(HTMLParser):
         """
         Called by HTMLParser.feed when an end tag is found.
         """
+        if DEBUG:
+            print("Handle endtag %s\nCurrent Parent: %s\nParent List: %s" % (tag, self.current_parent_element, self.list_stack))
         if tag in PARENT_ELEMENTS:
             if self.list_stack:
                 self.current_parent_element = self.list_stack.pop()
@@ -303,6 +319,8 @@ class CustomSlackdownHTMLParser(HTMLParser):
         """
         Called by HTMLParser.feed when text is found.
         """
+        if DEBUG:
+            print("Handle data %s\nCurrent Parent: %s\nParent List: %s" % (data, self.current_parent_element, self.list_stack))
         if self.current_parent_element['tag'] == '':
             self.cleaned_html += '<p>'
             self.current_parent_element['tag'] = 'p'
